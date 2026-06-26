@@ -37,7 +37,7 @@ const RECYCLE_EVERY = 80; // close+relaunch the browser after this many requests
 
 // Safe fallbacks returned on any failure (never throw out of a handler).
 const EMPTY_SEARCH = { items: [] };
-const EMPTY_OBSERVE = { textSignals: [], priceText: null, requiresSession: true };
+const EMPTY_OBSERVE = { textSignals: [], priceText: null, requiresSession: true, title: null };
 
 // ---------------------------------------------------------------------------
 // Shared browser (one Chromium, reused across requests, recycled periodically)
@@ -255,7 +255,14 @@ function scrapeObserveInPage({ phrases, urlWalls, textWalls }) {
     document.querySelector("#priceblock_ourprice");
   const priceText = priceEl ? String(priceEl.textContent).trim() : null;
 
-  return { textSignals: signals, priceText, requiresSession };
+  const titleEl = document.querySelector("#productTitle");
+  const title = titleEl
+    ? String(titleEl.textContent).trim()
+    : String(document.title || "")
+        .replace(/\s*[:|-]\s*amazon\.fr.*$/i, "")
+        .trim();
+
+  return { textSignals: signals, priceText, requiresSession, title };
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +394,7 @@ export async function runObserve(body) {
         textSignals: Array.isArray(scrape.textSignals) ? scrape.textSignals : [],
         priceText: scrape.priceText ?? null,
         requiresSession: Boolean(scrape.requiresSession),
+        title: scrape.title ?? null,
       };
     });
   } catch (err) {
