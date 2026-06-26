@@ -1,18 +1,18 @@
 {
   "name": "awp-scanner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Thin standalone Playwright service: reads PUBLIC Amazon pages with a real browser and returns raw signals to the AWP Cloudflare Worker (over Cloudflare Tunnel).",
-  "main": "src/server.js",
+  "description": "Self-hosted Playwright scanner: reads PUBLIC Amazon pages with a real browser and answers the AWP Cloudflare Worker over an OUTBOUND WebSocket (no inbound port; Tailscale stays the only ingress).",
+  "main": "src/client.js",
   "scripts": {
-    "start": "node src/server.js",
-    "postinstall": "echo \"Run 'npx playwright install --with-deps chromium' to download the browser (not bundled).\""
+    "start": "node src/client.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "playwright": "^1.49.0"
+    "playwright": "^1.49.0",
+    "ws": "^8.18.0"
   }
 }

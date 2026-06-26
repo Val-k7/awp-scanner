@@ -1,3 +1,7 @@
 node_modules
-.env
 .git
+.gitignore
+.env
+*.log
+README.md
+docker-compose.yml

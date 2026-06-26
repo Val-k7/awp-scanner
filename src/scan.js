@@ -1,31 +1,24 @@
 /**
- * AWP scanner — a thin, standalone Playwright service.
+ * AWP scanner — Playwright engine.
  *
- * It runs a REAL headless Chromium on a free Oracle Always Free VM and is called
- * by the AWP Cloudflare Worker (over a Cloudflare Tunnel) to read PUBLIC Amazon
- * pages. A real browser executes the page JS, so it passes Amazon's anti-bot
- * wall where a plain HTTP fetch would only get the challenge page.
+ * Runs a REAL headless Chromium and reads PUBLIC Amazon pages. A real browser
+ * executes the page JS, so it passes Amazon's anti-bot wall where a plain HTTP
+ * fetch would only get the challenge page.
  *
  * It is deliberately "thin": it returns RAW signals (button/availability text,
  * the displayed price, search-result asins) — NO detection/business logic. The
  * Worker keeps all of that. No Amazon login, no cookies, no captcha bypass: just
  * a real browser + standard desktop headers.
  *
- * HTTP contract (the Worker depends on this exactly):
- *   GET  /healthz                         -> 200 { ok: true }                 (no auth)
- *   POST /search  { marketplace, query, max }
- *                 -> 200 { items: SearchItem[] }                              (auth)
- *   POST /observe { url, marketplace }
- *                 -> 200 { textSignals, priceText, requiresSession }          (auth)
- *   Auth: header `Authorization: Bearer <SCAN_TOKEN>`; missing/wrong -> 401.
+ * Exposed:
+ *   runSearch({ marketplace, query, max })  -> { items: SearchItem[] }
+ *   runObserve({ url, marketplace })        -> { textSignals, priceText, requiresSession }
+ *   shutdownBrowser()                       -> closes the shared browser
  *
- * On any internal error it returns a SAFE empty result with 200 and logs — it
- * never 500-crashes the process.
- *
- * Env: SCAN_TOKEN (required for auth), PORT (default 8080).
+ * Both run* functions NEVER throw — on any internal error they return a SAFE
+ * empty result and log.
  */
 
-import http from "node:http";
 import { chromium } from "playwright";
 import {
   hostFor,
@@ -37,17 +30,9 @@ import {
   SESSION_WALL_TEXT_FRAGMENTS,
 } from "./parse.js";
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-
-const PORT = Number.parseInt(process.env.PORT ?? "8080", 10) || 8080;
-const SCAN_TOKEN = process.env.SCAN_TOKEN ?? "";
-
 const NAV_TIMEOUT_MS = 20_000; // goto timeout
 const SEARCH_WAIT_MS = 10_000; // wait for the results grid
 const SEARCH_NAV_RETRIES = 3; // re-navigate if zero results render
-const MAX_BODY_BYTES = 64 * 1024; // request body size limit
 const RECYCLE_EVERY = 80; // close+relaunch the browser after this many requests
 
 // Safe fallbacks returned on any failure (never throw out of a handler).
@@ -92,7 +77,6 @@ async function launchBrowser() {
 
 /** Ensure a live browser exists, recycling it every RECYCLE_EVERY requests. */
 async function getBrowser() {
-  // Serialize launch/recycle decisions through the lock.
   browserLock = browserLock.then(async () => {
     if (browser && requestsSinceLaunch >= RECYCLE_EVERY) {
       log(`[browser] recycling after ${requestsSinceLaunch} requests`);
@@ -110,6 +94,18 @@ async function getBrowser() {
   return browser;
 }
 
+/** Warm the browser at startup so the first request isn't slow. */
+export function warmBrowser() {
+  return getBrowser().catch((err) =>
+    logError("[scanner] initial browser launch failed (will retry on first request):", err && err.message),
+  );
+}
+
+export async function shutdownBrowser() {
+  if (browser) await browser.close().catch(() => {});
+  browser = null;
+}
+
 /**
  * Open a fresh, asset-light page in a throwaway context with the right locale
  * headers, run `fn`, and always clean up. `fn` gets the Playwright Page.
@@ -119,7 +115,7 @@ async function withPage(marketplace, fn) {
   requestsSinceLaunch++;
   const context = await b.newContext({
     userAgent: USER_AGENT,
-    locale: (acceptLanguageFor(marketplace).split(",")[0] || "fr-FR"),
+    locale: acceptLanguageFor(marketplace).split(",")[0] || "fr-FR",
     extraHTTPHeaders: { "Accept-Language": acceptLanguageFor(marketplace) },
     viewport: { width: 1366, height: 768 },
   });
@@ -155,10 +151,7 @@ async function dismissConsent(page) {
 // In-page extractors (serialized into the page via page.evaluate)
 // ---------------------------------------------------------------------------
 
-/**
- * Runs in the page context. Returns each search result's asin/title/href/price.
- * Pure DOM — no closure over server scope (must be self-contained).
- */
+/** Runs in the page context. Returns each search result's asin/title/price. */
 function scrapeSearchResultsInPage() {
   const out = [];
   const nodes = document.querySelectorAll(
@@ -168,9 +161,7 @@ function scrapeSearchResultsInPage() {
     const asin = String(node.getAttribute("data-asin") || "").trim();
     if (!asin) continue;
     const titleEl =
-      node.querySelector("h2 a span") ||
-      node.querySelector("h2 span") ||
-      node.querySelector("h2 a");
+      node.querySelector("h2 a span") || node.querySelector("h2 span") || node.querySelector("h2 a");
     const title = String(titleEl ? titleEl.textContent : "").trim();
     const priceEl = node.querySelector(".a-price .a-offscreen");
     const priceText = priceEl ? String(priceEl.textContent).trim() : null;
@@ -179,12 +170,7 @@ function scrapeSearchResultsInPage() {
   return out;
 }
 
-/**
- * Runs in the page context. Reads the buy/availability signals, the displayed
- * price, and detects a robot/captcha/sign-in wall. The phrase/wall lists are
- * passed in as a single arg (Playwright's page.evaluate passes ONE argument) so
- * the function can't close over server scope.
- */
+/** Runs in the page context. Reads buy/availability signals, price, robot wall. */
 function scrapeObserveInPage({ phrases, urlWalls, textWalls }) {
   const text = String((document.body && document.body.innerText) || "").toLowerCase();
   const url = String(location.href || "").toLowerCase();
@@ -220,10 +206,10 @@ function scrapeObserveInPage({ phrases, urlWalls, textWalls }) {
 }
 
 // ---------------------------------------------------------------------------
-// Handlers — each returns the contract shape and NEVER throws.
+// Public handlers — each returns the contract shape and NEVER throws.
 // ---------------------------------------------------------------------------
 
-async function handleSearch(body) {
+export async function runSearch(body) {
   const marketplace = typeof body.marketplace === "string" ? body.marketplace : "amazon.fr";
   const query = typeof body.query === "string" ? body.query : "";
   const max = Number.isFinite(body.max) && body.max > 0 ? Math.floor(body.max) : 15;
@@ -236,7 +222,6 @@ async function handleSearch(body) {
     return await withPage(marketplace, async (page) => {
       let raw = [];
       // Amazon's grid is client-hydrated; the first render is sometimes empty.
-      // Re-navigate up to SEARCH_NAV_RETRIES times until results appear.
       for (let attempt = 0; attempt < SEARCH_NAV_RETRIES; attempt++) {
         await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
         if (attempt === 0) await dismissConsent(page);
@@ -270,7 +255,7 @@ async function handleSearch(body) {
   }
 }
 
-async function handleObserve(body) {
+export async function runObserve(body) {
   const url = typeof body.url === "string" ? body.url : "";
   const marketplace = typeof body.marketplace === "string" ? body.marketplace : "amazon.fr";
   if (!url) return EMPTY_OBSERVE;
@@ -304,145 +289,3 @@ async function handleObserve(body) {
     return EMPTY_OBSERVE;
   }
 }
-
-// ---------------------------------------------------------------------------
-// HTTP plumbing
-// ---------------------------------------------------------------------------
-
-function sendJson(res, status, obj) {
-  const payload = JSON.stringify(obj);
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(payload),
-  });
-  res.end(payload);
-}
-
-/** Read the request body with a hard size cap; reject oversize bodies. */
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("payload too large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
-
-/** True when the request carries the correct Bearer token. */
-function isAuthorized(req) {
-  const header = req.headers["authorization"] || "";
-  const expected = `Bearer ${SCAN_TOKEN}`;
-  return SCAN_TOKEN.length > 0 && header === expected;
-}
-
-const server = http.createServer((req, res) => {
-  const started = Date.now();
-  const method = req.method || "GET";
-  // Strip query string for routing.
-  const path = (req.url || "/").split("?")[0];
-
-  // Wrap the whole thing so a handler bug can never crash the process.
-  const finish = (status) => {
-    log(`${method} ${path} ${status} ${Date.now() - started}ms`);
-  };
-
-  (async () => {
-    // Health check — no auth.
-    if (method === "GET" && path === "/healthz") {
-      sendJson(res, 200, { ok: true });
-      return finish(200);
-    }
-
-    // Everything else is POST + auth.
-    if (method !== "POST" || (path !== "/search" && path !== "/observe")) {
-      sendJson(res, 404, { error: "not_found" });
-      return finish(404);
-    }
-
-    if (!isAuthorized(req)) {
-      sendJson(res, 401, { error: "unauthorized" });
-      return finish(401);
-    }
-
-    // Parse the body (guarded).
-    let body;
-    try {
-      const rawBody = await readBody(req);
-      body = rawBody ? JSON.parse(rawBody) : {};
-      if (typeof body !== "object" || body === null) throw new Error("body must be an object");
-    } catch (err) {
-      // Malformed / oversize request -> 400. (Auth already passed.)
-      logError(`[http] bad request on ${path}:`, err && err.message ? err.message : err);
-      sendJson(res, 400, { error: "bad_request" });
-      return finish(400);
-    }
-
-    if (path === "/search") {
-      const result = await handleSearch(body);
-      sendJson(res, 200, result);
-      return finish(200);
-    }
-
-    // path === "/observe"
-    const result = await handleObserve(body);
-    sendJson(res, 200, result);
-    return finish(200);
-  })().catch((err) => {
-    // Absolute last-resort guard: a safe empty result, never a 500 crash.
-    logError(`[http] unhandled error on ${method} ${path}:`, err && err.stack ? err.stack : err);
-    try {
-      if (!res.headersSent) {
-        if (path === "/search") sendJson(res, 200, EMPTY_SEARCH);
-        else if (path === "/observe") sendJson(res, 200, EMPTY_OBSERVE);
-        else sendJson(res, 500, { error: "internal" });
-      }
-    } catch {
-      // res already torn down — nothing more to do.
-    }
-    finish("ERR");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Startup + lifecycle
-// ---------------------------------------------------------------------------
-
-server.listen(PORT, () => {
-  log(`[scanner] listening on :${PORT}`);
-  if (!SCAN_TOKEN) {
-    logError(
-      "[scanner] WARNING: SCAN_TOKEN is empty — all authed requests will 401. " +
-        "Set SCAN_TOKEN in the environment (.env).",
-    );
-  }
-  // Warm the browser at startup so the first request isn't slow.
-  getBrowser().catch((err) => {
-    logError("[scanner] initial browser launch failed (will retry on first request):", err && err.message);
-  });
-});
-
-// Don't let an unexpected async error tear down the process.
-process.on("unhandledRejection", (reason) => {
-  logError("[scanner] unhandledRejection:", reason);
-});
-process.on("uncaughtException", (err) => {
-  logError("[scanner] uncaughtException:", err && err.stack ? err.stack : err);
-});
-
-async function shutdown(signal) {
-  log(`[scanner] ${signal} received — shutting down`);
-  server.close(() => log("[scanner] http server closed"));
-  if (browser) await browser.close().catch(() => {});
-  process.exit(0);
-}
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
