@@ -202,14 +202,24 @@ function scrapeStoreInPage(brandHint) {
     const priceText = priceEl ? String(priceEl.textContent).trim() : null;
     out.push({ asin, title: String(title).slice(0, 160), priceText });
   }
-  // Category sub-pages of THIS store only (filter by the brand segment).
-  const subpages = [
-    ...new Set(
-      [...document.querySelectorAll('a[href*="/stores/"][href*="/page/"]')]
-        .map((a) => a.href)
-        .filter((h) => !brandHint || h.includes(brandHint)),
-    ),
-  ];
+  // Category tabs of the store = product TYPES. Each is a link to another store
+  // page (`/stores/page/<id>` or `/stores/<brand>/page/<id>`) whose nav text is
+  // the type name (Boosters, ETB, Coffrets…). Return {url,label}, deduped by url,
+  // keeping the first non-empty label. (brandHint is intentionally NOT used to
+  // filter — category pages live under `/stores/page/` without the brand slug.)
+  void brandHint;
+  const subMap = new Map();
+  for (const a of document.querySelectorAll('a[href*="/stores/"][href*="/page/"]')) {
+    const url = a.href;
+    if (!url) continue;
+    const label = String(a.textContent || a.getAttribute("aria-label") || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 60);
+    if (!subMap.has(url)) subMap.set(url, label);
+    else if (!subMap.get(url) && label) subMap.set(url, label);
+  }
+  const subpages = [...subMap.entries()].map(([url, label]) => ({ url, label }));
   return { products: out, subpages };
 }
 
