@@ -110,7 +110,14 @@ export async function shutdownBrowser() {
  * Open a fresh, asset-light page in a throwaway context with the right locale
  * headers, run `fn`, and always clean up. `fn` gets the Playwright Page.
  */
-async function withPage(marketplace, fn) {
+// Resource types blocked by default (search/observe): the data we need is in the
+// HTML/DOM, so this is much faster + lighter. Brand-store pages, however, render
+// their nav + lazy product shelves via CSS-driven widgets, so runStore keeps CSS
+// (and images, to trigger lazy-load) and only drops fonts/media.
+const DEFAULT_BLOCK = ["image", "stylesheet", "font", "media"];
+
+async function withPage(marketplace, fn, opts = {}) {
+  const block = opts.block ?? DEFAULT_BLOCK;
   const b = await getBrowser();
   requestsSinceLaunch++;
   const context = await b.newContext({
@@ -121,11 +128,8 @@ async function withPage(marketplace, fn) {
   });
   try {
     const page = await context.newPage();
-    // Block images / stylesheets / fonts / media — the data we need (text,
-    // prices, asins) is all in the HTML/DOM, and this is much faster + lighter.
     await page.route("**/*", (route) => {
-      const type = route.request().resourceType();
-      if (type === "image" || type === "stylesheet" || type === "font" || type === "media") {
+      if (block.includes(route.request().resourceType())) {
         route.abort().catch(() => {});
       } else {
         route.continue().catch(() => {});
@@ -307,16 +311,19 @@ export async function runStore(body) {
 
   const host = hostFor(marketplace);
   try {
-    return await withPage(marketplace, async (page) => {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
-      await dismissConsent(page);
-      // Brand-store shelves are lazy — scroll to the bottom a few times to load them.
-      for (let i = 0; i < 5; i++) {
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
-        await page.waitForTimeout(800);
-      }
-      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-      await page.waitForTimeout(300);
+    // Keep CSS + images so the store's nav + lazy shelves actually render.
+    return await withPage(
+      marketplace,
+      async (page) => {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
+        await dismissConsent(page);
+        // Brand-store shelves are lazy — scroll to the bottom a few times to load them.
+        for (let i = 0; i < 6; i++) {
+          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+          await page.waitForTimeout(1000);
+        }
+        await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+        await page.waitForTimeout(400);
 
       const data = await page
         .evaluate(scrapeStoreInPage, brandHint)
@@ -336,7 +343,7 @@ export async function runStore(body) {
         });
       }
       return { products, subpages: Array.isArray(data.subpages) ? data.subpages : [] };
-    });
+    }, { block: ["font", "media"] });
   } catch (err) {
     logError("[store] failed:", err && err.message ? err.message : err);
     return { products: [], subpages: [] };
