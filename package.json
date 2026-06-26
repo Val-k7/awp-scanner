@@ -1,0 +1,18 @@
+{
+  "name": "awp-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin standalone Playwright service: reads PUBLIC Amazon pages with a real browser and returns raw signals to the AWP Cloudflare Worker (over Cloudflare Tunnel).",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "postinstall": "echo \"Run 'npx playwright install --with-deps chromium' to download the browser (not bundled).\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

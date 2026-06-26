@@ -1,0 +1,23 @@
+# Quick way to run the scanner anywhere with Docker (incl. as a reference for the
+# NixOS oci-container — see SETUP-NIXOS.md). Exposure (Cloudflare Tunnel /
+# Tailscale Funnel) is handled outside this file.
+services:
+  awp-scanner:
+    build: .
+    image: awp-scanner:latest
+    restart: unless-stopped
+    environment:
+      - SCAN_TOKEN=${SCAN_TOKEN:?set SCAN_TOKEN}
+      - PORT=8080
+    ports:
+      # Listen on all interfaces; the HomeLab firewall restricts the port to the
+      # tailscale0 interface (per modules/apps.nix). Tailscale Funnel then exposes
+      # it publicly for the Cloudflare Worker.
+      - "8080:8080"
+    # Chromium needs a bit of shared memory; bump it to avoid crashes.
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
