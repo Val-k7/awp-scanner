@@ -170,6 +170,45 @@ function scrapeSearchResultsInPage() {
   return out;
 }
 
+/**
+ * Runs in the page context of an Amazon brand-store page. Extracts every product
+ * tile (asin + title + displayed price) and the store's category sub-page links
+ * (so the caller can crawl the whole store). Self-contained — no server closure.
+ */
+function scrapeStoreInPage(brandHint) {
+  const out = [];
+  const seen = new Set();
+  for (const a of document.querySelectorAll('a[href*="/dp/"]')) {
+    const m = (a.getAttribute("href") || "").match(/\/dp\/([A-Z0-9]{10})/);
+    if (!m) continue;
+    const asin = m[1];
+    if (seen.has(asin)) continue;
+    seen.add(asin);
+    const card = a.closest("li,[data-testid],[class*='ProductGridItem'],[class*='product'],div") || a;
+    const img = a.querySelector("img") || card.querySelector("img");
+    let title =
+      (img && (img.getAttribute("alt") || "")) ||
+      a.getAttribute("aria-label") ||
+      "";
+    if (!title) {
+      const h = card.querySelector("h2,h3,[class*='title'],[class*='Title']");
+      title = h ? h.textContent.trim() : "";
+    }
+    const priceEl = card.querySelector(".a-price .a-offscreen, .a-offscreen, [class*='price'] .a-offscreen");
+    const priceText = priceEl ? String(priceEl.textContent).trim() : null;
+    out.push({ asin, title: String(title).slice(0, 160), priceText });
+  }
+  // Category sub-pages of THIS store only (filter by the brand segment).
+  const subpages = [
+    ...new Set(
+      [...document.querySelectorAll('a[href*="/stores/"][href*="/page/"]')]
+        .map((a) => a.href)
+        .filter((h) => !brandHint || h.includes(brandHint)),
+    ),
+  ];
+  return { products: out, subpages };
+}
+
 /** Runs in the page context. Reads buy/availability signals, price, robot wall. */
 function scrapeObserveInPage({ phrases, urlWalls, textWalls }) {
   const text = String((document.body && document.body.innerText) || "").toLowerCase();
@@ -252,6 +291,55 @@ export async function runSearch(body) {
   } catch (err) {
     logError("[search] failed:", err && err.message ? err.message : err);
     return EMPTY_SEARCH;
+  }
+}
+
+/**
+ * Enumerate ONE Amazon brand-store page: returns its product tiles
+ * ({asin,title,url,priceCents}) and the store's category sub-page URLs so the
+ * caller can crawl the whole official store. Never throws → empty on failure.
+ */
+export async function runStore(body) {
+  const marketplace = typeof body.marketplace === "string" ? body.marketplace : "amazon.fr";
+  const url = typeof body.url === "string" ? body.url : "";
+  const brandHint = typeof body.brandHint === "string" ? body.brandHint : "";
+  if (!url) return { products: [], subpages: [] };
+
+  const host = hostFor(marketplace);
+  try {
+    return await withPage(marketplace, async (page) => {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
+      await dismissConsent(page);
+      // Brand-store shelves are lazy — scroll to the bottom a few times to load them.
+      for (let i = 0; i < 5; i++) {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+        await page.waitForTimeout(800);
+      }
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      await page.waitForTimeout(300);
+
+      const data = await page
+        .evaluate(scrapeStoreInPage, brandHint)
+        .catch(() => ({ products: [], subpages: [] }));
+
+      const seen = new Set();
+      const products = [];
+      for (const p of data.products ?? []) {
+        const asin = String(p.asin || "").trim();
+        if (!asin || seen.has(asin)) continue;
+        seen.add(asin);
+        products.push({
+          asin,
+          title: String(p.title || ""),
+          url: `https://${host}/dp/${asin}`,
+          priceCents: parsePriceCents(p.priceText),
+        });
+      }
+      return { products, subpages: Array.isArray(data.subpages) ? data.subpages : [] };
+    });
+  } catch (err) {
+    logError("[store] failed:", err && err.message ? err.message : err);
+    return { products: [], subpages: [] };
   }
 }
 

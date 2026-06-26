@@ -23,7 +23,7 @@
 
 import http from "node:http";
 import { WebSocket } from "ws";
-import { runSearch, runObserve, warmBrowser, shutdownBrowser } from "./scan.js";
+import { runSearch, runObserve, runStore, warmBrowser, shutdownBrowser } from "./scan.js";
 
 const SCAN_TOKEN = process.env.SCAN_TOKEN ?? "";
 const WORKER_WS_URL = process.env.WORKER_WS_URL ?? "wss://awp-api.kihwouih.workers.dev/ws/scanner";
@@ -98,6 +98,8 @@ async function handleRequest(msg) {
     result = await runSearch(msg.payload ?? {});
   } else if (msg.type === "observe") {
     result = await runObserve(msg.payload ?? {});
+  } else if (msg.type === "store") {
+    result = await runStore(msg.payload ?? {});
   } else {
     result = { error: "unknown_type" };
   }
